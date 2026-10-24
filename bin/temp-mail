@@ -25,6 +25,12 @@ HTML_DIR="${XDG_RUNTIME_DIR:-/tmp}/temp-mail"
 
 die() { jq -cn --arg e "$1" '{error: $e}'; exit 1; }
 
+# Several widget instances (multi-monitor, plugin reloads) share one state
+# file, so calls run one at a time: a poll never races a `new` or `delete`.
+mkdir -p "$STATE_DIR"
+exec 9>"$STATE_DIR/.temp-mail.lock"
+flock -w 20 9 || die "Busy, try again"
+
 # api METHOD PATH [JSON-BODY] [CONTENT-TYPE] -> sets BODY and HTTP_CODE
 api() {
   local method=$1 path=$2 body=${3:-} ctype=${4:-application/json} token="" out
@@ -41,16 +47,31 @@ api() {
     HTTP_CODE=${out##*$'\n'}
     out=${out%$'\n'*}
     [[ $HTTP_CODE == 429 && $attempt == 1 ]] && { sleep 1; continue; }
+    # A rejected token: log in again once with the stored password.
+    if [[ $HTTP_CODE == 401 && $attempt == 1 && -n $token ]] && relogin; then
+      token=$(jq -r '.token // ""' "$STATE_FILE")
+      continue
+    fi
     break
   done
   BODY=$out
+}
+
+relogin() {
+  local creds new
+  creds=$(jq -c '{address, password}' "$STATE_FILE")
+  new=$({
+    printf 'url = "%s/token"\nrequest = "POST"\nheader = "Content-Type: application/json"\n' "$API"
+    printf 'data = "%s"\n' "$(sed 's/\\/\\\\/g; s/"/\\"/g' <<<"$creds")"
+  } | curl -fsS --max-time 8 -K - 2>/dev/null | jq -r '.token // empty') || return 1
+  [[ -n $new ]] || return 1
+  jq --arg t "$new" '.token = $t' "$STATE_FILE" | write_state
 }
 
 require_state() { [[ -s $STATE_FILE ]] || die "No address"; }
 check_id() { [[ ${1:-} =~ ^[a-f0-9]{24}$ ]] || die "Bad message id"; }
 
 write_state() {
-  mkdir -p "$STATE_DIR"
   local tmp; tmp=$(mktemp "$STATE_DIR/.temp-mail.XXXXXX")
   cat >"$tmp"; chmod 600 "$tmp"; mv -f "$tmp" "$STATE_FILE"
 }
@@ -105,8 +126,9 @@ case "${1:-}" in
     [[ -s $STATE_FILE ]] && status || echo '{}'
     ;;
   messages)
-    require_state
+    [[ -s $STATE_FILE ]] || { echo '[]'; exit 0; }
     api GET /messages; body=$BODY
+    [[ $HTTP_CODE == 401 ]] && die "This address no longer exists on mail.tm. Press New."
     [[ $HTTP_CODE == 200 ]] || die "Inbox error (HTTP $HTTP_CODE)"
     jq -c '[.[] | {id, from: .from.address, fromName: (.from.name // ""), subject: (.subject // ""),
       intro: (.intro // ""), seen, hasAttachments, createdAt}]' <<<"$body"
