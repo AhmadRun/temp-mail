@@ -1,0 +1,147 @@
+#!/bin/bash
+
+# Temp Mail helper: the only code that talks to the mail.tm API.
+#
+#   temp-mail new <minutes>        create a new address (deletes the old one)
+#   temp-mail extend <minutes>     push the expiry later (max 60 min from now)
+#   temp-mail status               public state (no token)
+#   temp-mail messages             inbox as a compact JSON array
+#   temp-mail read <id>            one message (marks it seen)
+#   temp-mail open <id>            open the HTML version in the browser
+#   temp-mail delete-message <id>  delete one message
+#   temp-mail delete               delete the address and local state
+#
+# The bearer token lives only in the state file (mode 0600) and goes to curl
+# as a config on stdin, never argv: process arguments are world-readable
+# through /proc/<pid>/cmdline.
+
+set -euo pipefail
+umask 077
+
+API="https://api.mail.tm"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/settings"
+STATE_FILE="$STATE_DIR/temp-mail.json"
+HTML_DIR="${XDG_RUNTIME_DIR:-/tmp}/temp-mail"
+
+die() { jq -cn --arg e "$1" '{error: $e}'; exit 1; }
+
+# api METHOD PATH [JSON-BODY] [CONTENT-TYPE] -> sets BODY and HTTP_CODE
+api() {
+  local method=$1 path=$2 body=${3:-} ctype=${4:-application/json} token="" out
+  [[ -s $STATE_FILE ]] && token=$(jq -r '.token // ""' "$STATE_FILE")
+  for attempt in 1 2; do
+    out=$({
+      printf 'url = "%s%s"\nrequest = "%s"\nheader = "Accept: application/json"\n' "$API" "$path" "$method"
+      [[ -n $token && $path != /token && $path != /accounts ]] && printf 'header = "Authorization: Bearer %s"\n' "$token"
+      if [[ -n $body ]]; then
+        printf 'header = "Content-Type: %s"\n' "$ctype"
+        printf 'data = "%s"\n' "$(sed 's/\\/\\\\/g; s/"/\\"/g' <<<"$body")"
+      fi
+    } | curl -sS --max-time 8 -w '\n%{http_code}' -K - 2>/dev/null) || die "Can't reach mail.tm"
+    HTTP_CODE=${out##*$'\n'}
+    out=${out%$'\n'*}
+    [[ $HTTP_CODE == 429 && $attempt == 1 ]] && { sleep 1; continue; }
+    break
+  done
+  BODY=$out
+}
+
+require_state() { [[ -s $STATE_FILE ]] || die "No address"; }
+check_id() { [[ ${1:-} =~ ^[a-f0-9]{24}$ ]] || die "Bad message id"; }
+
+write_state() {
+  mkdir -p "$STATE_DIR"
+  local tmp; tmp=$(mktemp "$STATE_DIR/.temp-mail.XXXXXX")
+  cat >"$tmp"; chmod 600 "$tmp"; mv -f "$tmp" "$STATE_FILE"
+}
+
+status() { jq -c '{address, createdAt, expiresAt}' "$STATE_FILE"; }
+
+delete_account() {
+  if [[ -s $STATE_FILE ]]; then
+    local id; id=$(jq -r '.accountId // ""' "$STATE_FILE")
+    [[ -n $id ]] && api DELETE "/accounts/$id" || true
+    rm -f "$STATE_FILE"
+  fi
+  rm -rf "$HTML_DIR"
+}
+
+rand() { local s; s=$(LC_ALL=C tr -dc "$1" </dev/urandom | head -c "$2") || true; printf %s "$s"; }
+
+minutes_arg() { [[ ${1:-} =~ ^[0-9]+$ && $1 -ge 1 && $1 -le 60 ]] || die "Minutes must be 1-60"; echo "$1"; }
+
+case "${1:-}" in
+  new)
+    minutes=$(minutes_arg "${2:-10}")
+    delete_account
+    api GET /domains
+    domain=$(jq -r '[.[] | select(.isActive and (.isPrivate | not))][0].domain // empty' <<<"$BODY")
+    [[ -n $domain ]] || die "No mail.tm domain available"
+    password=$(rand 'A-Za-z0-9' 24)
+    for _ in 1 2 3; do
+      address="$(rand 'a-z' 1)$(rand 'a-z0-9' 9)@$domain"
+      api POST /accounts "$(jq -cn --arg a "$address" --arg p "$password" '{address: $a, password: $p}')"; account=$BODY
+      [[ $HTTP_CODE == 201 ]] && break
+    done
+    [[ $HTTP_CODE == 201 ]] || die "Could not create address (HTTP $HTTP_CODE)"
+    api POST /token "$(jq -cn --arg a "$address" --arg p "$password" '{address: $a, password: $p}')"
+    token=$(jq -r '.token // empty' <<<"$BODY")
+    [[ -n $token ]] || die "Could not log in"
+    now=$(date +%s)
+    jq -n --arg a "$address" --arg id "$(jq -r .id <<<"$account")" --arg t "$token" --arg p "$password" \
+      --argjson c "$now" --argjson e $((now + minutes * 60)) \
+      '{address: $a, accountId: $id, token: $t, password: $p, createdAt: $c, expiresAt: $e}' | write_state
+    status
+    ;;
+  extend)
+    require_state
+    minutes=$(minutes_arg "${2:-10}")
+    now=$(date +%s)
+    jq --argjson m $((minutes * 60)) --argjson cap $((now + 3600)) \
+      '.expiresAt = ([.expiresAt + $m, $cap] | min)' "$STATE_FILE" | write_state
+    status
+    ;;
+  status)
+    [[ -s $STATE_FILE ]] && status || echo '{}'
+    ;;
+  messages)
+    require_state
+    api GET /messages; body=$BODY
+    [[ $HTTP_CODE == 200 ]] || die "Inbox error (HTTP $HTTP_CODE)"
+    jq -c '[.[] | {id, from: .from.address, fromName: (.from.name // ""), subject: (.subject // ""),
+      intro: (.intro // ""), seen, hasAttachments, createdAt}]' <<<"$body"
+    ;;
+  read)
+    require_state; check_id "${2:-}"
+    api GET "/messages/$2"; body=$BODY
+    [[ $HTTP_CODE == 200 ]] || die "Message error (HTTP $HTTP_CODE)"
+    jq -c '{id, from: .from.address, fromName: (.from.name // ""), subject: (.subject // ""), createdAt,
+      text: (.text // ""), verifications: (.verifications // []), hasHtml: ((.html // []) | length > 0),
+      attachments: [(.attachments // [])[] | {filename, size}]}' <<<"$body"
+    api PATCH "/messages/$2" '{"seen":true}' application/merge-patch+json || true
+    ;;
+  open)
+    require_state; check_id "${2:-}"
+    api GET "/messages/$2"; body=$BODY
+    [[ $HTTP_CODE == 200 ]] || die "Message error (HTTP $HTTP_CODE)"
+    mkdir -p "$HTML_DIR"
+    file="$HTML_DIR/$2.html"
+    { printf '<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="script-src '"'none'"'; object-src '"'none'"'; form-action '"'none'"'">\n'
+      jq -r '(.html // []) | join("\n")' <<<"$body"; } >"$file"
+    omarchy-launch-browser "file://$file" >/dev/null 2>&1 &
+    echo '{}'
+    ;;
+  delete-message)
+    require_state; check_id "${2:-}"
+    api DELETE "/messages/$2"
+    echo '{}'
+    ;;
+  delete)
+    delete_account
+    echo '{}'
+    ;;
+  *)
+    echo "Usage: temp-mail new|extend <minutes> | status | messages | read|open|delete-message <id> | delete" >&2
+    exit 1
+    ;;
+esac

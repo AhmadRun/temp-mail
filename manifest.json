@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.ahmadrun.temp-mail",
+  "name": "Temp Mail",
+  "version": "0.1.0",
+  "author": "Ahmad Elyan",
+  "license": "MIT",
+  "repository": "https://github.com/AhmadRun/temp-mail",
+  "description": "Disposable 10 or 30 minute email addresses with an inbox in the Omarchy bar, so you can sign up on websites without your real email. Powered by mail.tm.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "TempMailWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Temp Mail",
+    "description": "A throwaway email address with a countdown and an inbox.",
+    "category": "Tools",
+    "aliases": ["tempmail", "temp mail", "email", "mail", "10minutemail", "disposable", "burner"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "defaultDuration": "10",
+      "extendMinutes": 10,
+      "pollSeconds": 5,
+      "notifyNewMail": true,
+      "iconOnly": false
+    },
+    "schema": [
+      {
+        "key": "defaultDuration",
+        "type": "enum",
+        "label": "Default lifetime (minutes)",
+        "options": ["10", "30"],
+        "defaultValue": "10",
+        "description": "How long a new address lives before it is deleted."
+      },
+      {
+        "key": "extendMinutes",
+        "type": "integer",
+        "label": "Extend by (minutes)",
+        "min": 1,
+        "max": 30,
+        "step": 1,
+        "defaultValue": 10,
+        "description": "Time added by the + button. An address never lives more than 60 minutes from now."
+      },
+      {
+        "key": "pollSeconds",
+        "type": "integer",
+        "label": "Check for mail every (seconds)",
+        "min": 3,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 5
+      },
+      {
+        "key": "notifyNewMail",
+        "type": "boolean",
+        "label": "Notify on new mail",
+        "defaultValue": true
+      },
+      {
+        "key": "iconOnly",
+        "type": "boolean",
+        "label": "Icon only in the bar",
+        "defaultValue": false,
+        "description": "Hide the countdown; hover for the address and time left."
+      }
+    ]
+  }
+}
