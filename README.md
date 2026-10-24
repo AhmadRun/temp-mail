@@ -27,6 +27,14 @@ Or copy this folder to `~/.config/omarchy/plugins/io.github.ahmadrun.temp-mail/`
 
 Needs `curl`, `jq`, and `wl-copy` (all part of Omarchy).
 
+## Remove
+
+```bash
+omarchy-shell io.github.ahmadrun.temp-mail.mail remove   # delete the current address
+omarchy plugin remove io.github.ahmadrun.temp-mail
+rm -f ~/.local/state/omarchy/settings/temp-mail.json
+```
+
 ## Usage
 
 | Action | How |
