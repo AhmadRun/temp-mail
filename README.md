@@ -4,6 +4,8 @@ A disposable email address in the Omarchy bar. Use it to sign up on websites wit
 
 Powered by the free [mail.tm](https://mail.tm) API.
 
+![Temp Mail popup](preview.png)
+
 ## Features
 
 - One click makes a random address and copies it to the clipboard.
