@@ -13,7 +13,8 @@
 #
 # The bearer token lives only in the state file (mode 0600) and goes to curl
 # as a config on stdin, never argv: process arguments are world-readable
-# through /proc/<pid>/cmdline.
+# through /proc/<pid>/cmdline. For the same reason the token and password
+# reach jq only through its environment, never as --arg values.
 
 set -euo pipefail
 umask 077
@@ -65,7 +66,7 @@ relogin() {
     printf 'data = "%s"\n' "$(sed 's/\\/\\\\/g; s/"/\\"/g' <<<"$creds")"
   } | curl -fsS --max-time 8 -K - 2>/dev/null | jq -r '.token // empty') || return 1
   [[ -n $new ]] || return 1
-  jq --arg t "$new" '.token = $t' "$STATE_FILE" | write_state
+  TM_TOKEN=$new jq '.token = env.TM_TOKEN' "$STATE_FILE" | write_state
 }
 
 require_state() { [[ -s $STATE_FILE ]] || die "No address"; }
@@ -87,6 +88,10 @@ delete_account() {
   rm -rf "$HTML_DIR"
 }
 
+# Login JSON for the current $address/$password. Secrets reach jq through its
+# environment (/proc/<pid>/environ is owner-only), never through argv.
+creds() { TM_ADDRESS=$address TM_PASSWORD=$password jq -cn '{address: env.TM_ADDRESS, password: env.TM_PASSWORD}'; }
+
 rand() { local s; s=$(LC_ALL=C tr -dc "$1" </dev/urandom | head -c "$2") || true; printf %s "$s"; }
 
 minutes_arg() { [[ ${1:-} =~ ^[0-9]+$ && $1 -ge 1 && $1 -le 60 ]] || die "Minutes must be 1-60"; echo "$1"; }
@@ -101,17 +106,18 @@ case "${1:-}" in
     password=$(rand 'A-Za-z0-9' 24)
     for _ in 1 2 3; do
       address="$(rand 'a-z' 1)$(rand 'a-z0-9' 9)@$domain"
-      api POST /accounts "$(jq -cn --arg a "$address" --arg p "$password" '{address: $a, password: $p}')"; account=$BODY
+      api POST /accounts "$(creds)"; account=$BODY
       [[ $HTTP_CODE == 201 ]] && break
     done
     [[ $HTTP_CODE == 201 ]] || die "Could not create address (HTTP $HTTP_CODE)"
-    api POST /token "$(jq -cn --arg a "$address" --arg p "$password" '{address: $a, password: $p}')"
+    api POST /token "$(creds)"
     token=$(jq -r '.token // empty' <<<"$BODY")
     [[ -n $token ]] || die "Could not log in"
     now=$(date +%s)
-    jq -n --arg a "$address" --arg id "$(jq -r .id <<<"$account")" --arg t "$token" --arg p "$password" \
-      --argjson c "$now" --argjson e $((now + minutes * 60)) \
-      '{address: $a, accountId: $id, token: $t, password: $p, createdAt: $c, expiresAt: $e}' | write_state
+    TM_ADDRESS=$address TM_PASSWORD=$password TM_TOKEN=$token TM_ACCOUNT=$account \
+      jq -n --argjson c "$now" --argjson e $((now + minutes * 60)) \
+      '{address: env.TM_ADDRESS, accountId: (env.TM_ACCOUNT | fromjson | .id), token: env.TM_TOKEN,
+        password: env.TM_PASSWORD, createdAt: $c, expiresAt: $e}' | write_state
     status
     ;;
   extend)
