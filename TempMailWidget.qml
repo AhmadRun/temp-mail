@@ -66,9 +66,13 @@ Panel {
     Quickshell.execDetached(["notify-send", "-a", "Temp Mail", "-u", urgency || "normal", title, body])
   }
 
+  // The payload goes to wl-copy on stdin, never argv: process arguments are
+  // world-readable through /proc/<pid>/cmdline and the text can be a
+  // verification code.
   function copy(text, label) {
     if (!text) return
-    Quickshell.execDetached(["wl-copy", "--", text])
+    var proc = clipboardProcess.createObject(root, { payload: String(text) })
+    proc.running = true
     notify("Copied " + (label || "to clipboard"), "", "low")
   }
 
@@ -233,6 +237,22 @@ Panel {
       onStreamFinished: root.handleResult(helper.kind, String(text || ""))
     }
     onExited: root.flush()
+  }
+
+  // One short-lived wl-copy per copy(): stdin closes after the write, which
+  // a Process cannot reopen, so each copy gets a fresh instance.
+  Component {
+    id: clipboardProcess
+    Process {
+      property string payload: ""
+      command: ["wl-copy"]
+      stdinEnabled: true
+      onStarted: {
+        write(payload)
+        stdinEnabled = false
+      }
+      onExited: destroy()
+    }
   }
 
   // Extra controls for keybinds:
